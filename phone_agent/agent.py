@@ -2,8 +2,9 @@
 
 import json
 import traceback
+import sys
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any, Callable, List
 
 from phone_agent.actions import ActionHandler
 from phone_agent.actions.handler import do, finish, parse_action
@@ -39,6 +40,37 @@ class StepResult:
     message: str | None = None
 
 
+class VerboseOutputHandler:
+    """
+    Handler for capturing verbose output and sending it to various destinations.
+    """
+    
+    def __init__(self):
+        self.callbacks: List[Callable[[str], None]] = []
+    
+    def add_callback(self, callback: Callable[[str], None]):
+        """Add a callback function to receive verbose output."""
+        self.callbacks.append(callback)
+    
+    def remove_callback(self, callback: Callable[[str], None]):
+        """Remove a callback function."""
+        if callback in self.callbacks:
+            self.callbacks.remove(callback)
+    
+    def write(self, message: str):
+        """Write a message to all callbacks."""
+        for callback in self.callbacks:
+            try:
+                callback(message)
+            except Exception:
+                # Ignore errors in callbacks
+                pass
+    
+    def flush(self):
+        """Flush method for compatibility with stdout interface."""
+        pass
+
+
 class PhoneAgent:
     """
     AI-powered agent for automating Android phone interactions.
@@ -72,6 +104,7 @@ class PhoneAgent:
         self.agent_config = agent_config or AgentConfig()
 
         self.model_client = ModelClient(self.model_config)
+        # self.model_client.set_verbose_callback(self._verbose_print)
         self.action_handler = ActionHandler(
             device_id=self.agent_config.device_id,
             confirmation_callback=confirmation_callback,
@@ -80,6 +113,12 @@ class PhoneAgent:
 
         self._context: list[dict[str, Any]] = []
         self._step_count = 0
+        self.verbose_handler = VerboseOutputHandler()
+
+    def _verbose_print(self, message: str):
+        """Print message through verbose handler and to console."""
+        print(message)
+        self.verbose_handler.write(message)
 
     def run(self, task: str) -> str:
         """
@@ -173,24 +212,31 @@ class PhoneAgent:
             print("\n" + "=" * 50)
             print(f"💭 {msgs['thinking']}:")
             print("-" * 50)
+            thinking_header = f"\n{'=' * 50}\n💭 {msgs['thinking']}:\n{'-' * 50}\n"
+            if self.agent_config.verbose:
+                self.verbose_handler.write(thinking_header)
             response = self.model_client.request(self._context)
         except Exception as e:
+            error_msg = f"Model error: {e}"
             if self.agent_config.verbose:
-                traceback.print_exc()
+                error_traceback = traceback.format_exc()
+                self.verbose_handler.write(error_traceback)
+                self.verbose_handler.write(error_msg)
             return StepResult(
                 success=False,
                 finished=True,
                 action=None,
                 thinking="",
-                message=f"Model error: {e}",
+                message=error_msg,
             )
 
         # Parse action from response
         try:
             action = parse_action(response.action)
-        except ValueError:
+        except ValueError as e:
             if self.agent_config.verbose:
-                traceback.print_exc()
+                error_traceback = traceback.format_exc()
+                self.verbose_handler.write(error_traceback)
             action = finish(message=response.action)
 
         if self.agent_config.verbose:
@@ -199,6 +245,10 @@ class PhoneAgent:
             print(f"🎯 {msgs['action']}:")
             print(json.dumps(action, ensure_ascii=False, indent=2))
             print("=" * 50 + "\n")
+            action_header = f"{'-' * 50}\n🎯 {msgs['action']}:\n"
+            action_json = json.dumps(action, ensure_ascii=False, indent=2)
+            end_separator = f"{'=' * 50}\n"
+            self.verbose_handler.write(action_header + action_json + "\n" + end_separator)
 
         # Remove image from context to save space
         self._context[-1] = MessageBuilder.remove_images_from_message(self._context[-1])
@@ -210,7 +260,8 @@ class PhoneAgent:
             )
         except Exception as e:
             if self.agent_config.verbose:
-                traceback.print_exc()
+                error_traceback = traceback.format_exc()
+                self.verbose_handler.write(error_traceback)
             result = self.action_handler.execute(
                 finish(message=str(e)), screenshot.width, screenshot.height
             )
@@ -218,7 +269,7 @@ class PhoneAgent:
         # Add assistant response to context
         self._context.append(
             MessageBuilder.create_assistant_message(
-                f"<think>{response.thinking}</think><answer>{response.action}</answer>"
+                f"{'<thinking>' + response.thinking + '</thinking>' if response.thinking else ''}<answer>{response.action}</answer>"
             )
         )
 
@@ -232,6 +283,8 @@ class PhoneAgent:
                 f"✅ {msgs['task_completed']}: {result.message or action.get('message', msgs['done'])}"
             )
             print("=" * 50 + "\n")
+            completed_msg = f"\n{'🎉 ' + '=' * 48}\n✅ {msgs['task_completed']}: {result.message or action.get('message', msgs['done'])}\n{'=' * 50}\n"
+            self.verbose_handler.write(completed_msg)
 
         return StepResult(
             success=result.success,

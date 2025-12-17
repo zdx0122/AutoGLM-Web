@@ -3,7 +3,7 @@
 import json
 import time
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Callable
 
 from openai import OpenAI
 
@@ -49,6 +49,20 @@ class ModelClient:
     def __init__(self, config: ModelConfig | None = None):
         self.config = config or ModelConfig()
         self.client = OpenAI(base_url=self.config.base_url, api_key=self.config.api_key)
+        self.verbose_callback: Callable[[str], None] | None = None
+
+    def set_verbose_callback(self, callback: Callable[[str], None] | None):
+        """Set callback function for verbose output."""
+        self.verbose_callback = callback
+
+    def _verbose_print(self, message: str):
+        """Print message to verbose callback if set, otherwise to stdout."""
+        # Always print to stdout/console
+        print(message)
+        
+        # Also send to callback if set
+        if self.verbose_callback:
+            self.verbose_callback(message)
 
     def request(self, messages: list[dict[str, Any]]) -> ModelResponse:
         """
@@ -81,6 +95,7 @@ class ModelClient:
 
         raw_content = ""
         buffer = ""  # Buffer to hold content that might be part of a marker
+        thinking_buffer = ""  # Buffer to accumulate thinking content for better display
         action_markers = ["finish(message=", "do(action="]
         in_action_phase = False  # Track if we've entered the action phase
         first_token_received = False
@@ -111,6 +126,10 @@ class ModelClient:
                         thinking_part = buffer.split(marker, 1)[0]
                         print(thinking_part, end="", flush=True)
                         print()  # Print newline after thinking is complete
+                        if thinking_part:  # Only print if there's content
+                            thinking_buffer += thinking_part
+                            # self._verbose_print(thinking_buffer)
+                            thinking_buffer = ""  # Reset thinking buffer
                         in_action_phase = True
                         marker_found = True
 
@@ -136,8 +155,21 @@ class ModelClient:
 
                 if not is_potential_marker:
                     # Safe to print the buffer
-                    print(buffer, end="", flush=True)
+                    # print(buffer, end="", flush=True)
+                    if buffer:  # Only print if there's content
+                        thinking_buffer += buffer
+                        # Print accumulated thinking content when we hit a newline or have a substantial amount
+                        if '\n' in thinking_buffer or len(thinking_buffer) > 100:
+                            lines = thinking_buffer.split('\n')
+                            thinking_buffer = lines[-1]  # Keep the last incomplete line in buffer
+                            for line in lines[:-1]:
+                                if line:  # Only print non-empty lines
+                                    self._verbose_print(line)
                     buffer = ""
+
+        # Print any remaining thinking content
+        # if thinking_buffer:
+        #     self._verbose_print(thinking_buffer)
 
         # Calculate total time
         total_time = time.time() - start_time
@@ -151,18 +183,37 @@ class ModelClient:
         print("=" * 50)
         print(f"⏱️  {get_message('performance_metrics', lang)}:")
         print("-" * 50)
+        metrics_lines = [
+            "",
+            "=" * 50,
+            f"⏱️  {get_message('performance_metrics', lang)}:",
+            "-" * 50
+        ]
         if time_to_first_token is not None:
             print(
+                f"{get_message('time_to_first_token', lang)}: {time_to_first_token:.3f}s"
+            )
+            metrics_lines.append(
                 f"{get_message('time_to_first_token', lang)}: {time_to_first_token:.3f}s"
             )
         if time_to_thinking_end is not None:
             print(
                 f"{get_message('time_to_thinking_end', lang)}:        {time_to_thinking_end:.3f}s"
             )
-        print(
-            f"{get_message('total_inference_time', lang)}:          {total_time:.3f}s"
-        )
-        print("=" * 50)
+            print(
+                f"{get_message('total_inference_time', lang)}:          {total_time:.3f}s"
+            )
+            print("=" * 50)
+            metrics_lines.append(
+                f"{get_message('time_to_thinking_end', lang)}:        {time_to_thinking_end:.3f}s"
+            )
+        metrics_lines.extend([
+            f"{get_message('total_inference_time', lang)}:          {total_time:.3f}s",
+            "=" * 50
+        ])
+        
+        # for line in metrics_lines:
+        #     self._verbose_print(line)
 
         return ModelResponse(
             thinking=thinking,

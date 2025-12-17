@@ -12,6 +12,7 @@ import threading
 import uuid
 from datetime import datetime
 from typing import Dict, List, Optional
+from collections import deque
 
 import uvicorn
 from fastapi import FastAPI, HTTPException
@@ -58,7 +59,7 @@ class TaskExecutionResponse(BaseModel):
 
 # Storage for tasks and executions
 tasks: Dict[str, TaskInfo] = {}
-executions: Dict[str, Dict] = {}  # execution_id -> {task_id, thread, agent, status, result}
+executions: Dict[str, Dict] = {}  # execution_id -> {task_id, thread, agent, status, result, logs}
 
 # Create FastAPI app
 app = FastAPI(title="Phone Agent Web UI", description="Web interface for managing phone automation tasks")
@@ -163,10 +164,34 @@ async def delete_task(task_id: str):
     return {"message": "Task deleted successfully"}
 
 # Task Execution APIs
+class VerboseLogger:
+    """Custom logger to capture verbose output from PhoneAgent"""
+    def __init__(self, execution_id: str):
+        self.execution_id = execution_id
+        self.logs = []
+    
+    def log(self, message: str):
+        """Add a log message"""
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        log_entry = f"[{timestamp}] {message}"
+        self.logs.append(log_entry)
+        # Keep only last 1000 logs to prevent memory issues
+        # Increase limit to preserve more detailed logs
+        if len(self.logs) > 1000:
+            self.logs.pop(0)
+        # Also store in executions for API access
+        if self.execution_id in executions:
+            executions[self.execution_id]["logs"] = self.logs
+    
+    def get_logs(self) -> List[str]:
+        """Get all logs"""
+        return self.logs.copy()
+
 def run_task_execution(execution_id: str, task_info: TaskInfo):
     """Run the task in a separate thread."""
     try:
         executions[execution_id]["status"] = "running"
+        executions[execution_id]["logs"] = []
         
         # Create model and agent configs
         model_config = ModelConfig(
@@ -179,11 +204,16 @@ def run_task_execution(execution_id: str, task_info: TaskInfo):
         agent_config = AgentConfig(
             max_steps=task_info.max_steps,
             device_id=task_info.device_id,
-            lang=task_info.lang
+            lang=task_info.lang,
+            verbose=True  # Always enable verbose for web UI
         )
         
-        # Create agent
+        # Custom logger for verbose output
+        verbose_logger = VerboseLogger(execution_id)
+        
+        # Create agent with verbose callback
         agent = PhoneAgent(model_config=model_config, agent_config=agent_config)
+        agent.verbose_handler.add_callback(verbose_logger.log)
         executions[execution_id]["agent"] = agent
         
         # Run the task
@@ -210,7 +240,8 @@ async def execute_task(task_id: str):
         "thread": None,
         "agent": None,
         "status": "pending",
-        "result": None
+        "result": None,
+        "logs": []
     }
     
     # Start execution in a separate thread
@@ -258,7 +289,8 @@ async def get_execution_status(execution_id: str):
         "execution_id": execution_id,
         "task_id": execution["task_id"],
         "status": execution["status"],
-        "result": execution["result"]
+        "result": execution["result"],
+        "logs": execution.get("logs", [])
     }
 
 @app.get("/")
